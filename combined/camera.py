@@ -9,6 +9,7 @@ class Camera:
         }
         self.targetVec = np.array([0,0,-1])
         self.upVec = np.array([1,0,0])
+        self.eye_position = cameraEyePosition
         self.viewMatrix = pb.computeViewMatrix(
             cameraEyePosition=cameraEyePosition,
             cameraTargetPosition = cameraEyePosition + self.targetVec,
@@ -33,6 +34,7 @@ class Camera:
         self.__init__(size=self.size, height=h)
 
     def set_new_position(self, pos, rotMat = np.eye(3)):
+        self.eye_position = pos
         self.viewMatrix = pb.computeViewMatrix(
             cameraEyePosition = pos,
             cameraTargetPosition = pos + (rotMat @ self.targetVec).flatten(),

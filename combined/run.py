@@ -1,147 +1,244 @@
-import pybullet as p
-import numpy as np
+import argparse
+import logging
 import time
-from camera import Camera
+from typing import List, Tuple
+
 import cv2
+import matplotlib.pyplot as plt
+import numpy as np
+from combined.camera import Camera
 
-IMG_SIDE = 300
-IMG_HALF = IMG_SIDE/2
-MARKER_LENGTH = 0.1
-MARKER_CORNERS_WORLD = np.array(
-    [
-        [-MARKER_LENGTH/2,MARKER_LENGTH/2,0.0,1],
-        [MARKER_LENGTH/2,MARKER_LENGTH/2,0.0,1],
-        [MARKER_LENGTH/2,-MARKER_LENGTH/2.0,0.0,1],
-        [-MARKER_LENGTH/2,-MARKER_LENGTH/2,0.0,1]
-    ]
+import pybullet as p
+from combined.config import (
+    ARUCO_TEXTURE,
+    ARUCO_URDF,
+    IMG_HALF,
+    IMG_SIDE,
+    LAMBDA,
+    SIMULATION_URDF,
+    START_POSITION,
+    TARGET_POSITION,
+    eefLinkIdx,
+    jointIndices,
+    logTime,
+    simulation_steps,
 )
-dictionary = cv2.aruco.getPredefinedDictionary(cv2.aruco.DICT_4X4_50)
-parameters = cv2.aruco.DetectorParameters()
-parameters.cornerRefinementMethod = cv2.aruco.CORNER_REFINE_SUBPIX
-detector = cv2.aruco.ArucoDetector(dictionary, parameters)
 
-def computeInterMatrix(Z, sd0):
-    L = np.zeros((8,3))
+
+class FeatureExtractor:
+    def __init__(self, body_id: int):
+        self.body_id = body_id
+        self.detector = self._create_detector()
+        self.camera = Camera(imgSize=[IMG_SIDE, IMG_SIDE])
+
+    @staticmethod
+    def _create_detector() -> cv2.aruco.ArucoDetector:
+        dictionary = cv2.aruco.getPredefinedDictionary(cv2.aruco.DICT_4X4_50)
+        parameters = cv2.aruco.DetectorParameters()
+        parameters.cornerRefinementMethod = cv2.aruco.CORNER_REFINE_SUBPIX
+        detector = cv2.aruco.ArucoDetector(dictionary, parameters)
+        return detector
+
+    def update_camera_position(self):
+        linkState = p.getLinkState(self.body_id, linkIndex=8)
+        xyz = linkState[0]
+        quaternion = linkState[1]
+        rotation = p.getMatrixFromQuaternion(quaternion)
+        rotation = np.reshape(np.array(rotation), (3, 3))
+        self.camera.set_new_position(xyz, rotation)
+
+    def get_features(self) -> cv2.typing.MatLike:
+        self.update_camera_position()
+        img = self.camera.get_frame()
+        corners, _, _ = self.detector.detectMarkers(img)
+        return corners
+
+
+def computeInteractionMatrix(Z: float, sd0: np.ndarray) -> np.ndarray:
+    L = np.zeros((8, 4))
     for idx in range(4):
-        x = sd0[2*idx, 0]
-        y = sd0[2*idx+1, 0]
-        L[2*idx] = np.array([-1/Z,0,y])
-        L[2*idx+1] = np.array([0,-1/Z,-x])
+        x = sd0[2 * idx, 0]
+        y = sd0[2 * idx + 1, 0]
+        L[2 * idx] = np.array([-1 / Z, 0, x / Z, y])
+        L[2 * idx + 1] = np.array([0, -1 / Z, y / Z, -x])
     return L
 
-def updateCamPos(cam):
-    linkState = p.getLinkState(boxId, linkIndex=6)
-    # pos
-    xyz = linkState[0]
-    # orientation
-    quat = linkState[1]
-    rotMat = p.getMatrixFromQuaternion(quat)
-    rotMat = np.reshape(np.array(rotMat),(3,3))
-    camera.set_new_position(xyz, rotMat)
-    
 
-camera = Camera(imgSize = [IMG_SIDE, IMG_SIDE])
+def get_feature_vector(corners: cv2.typing.MatLike) -> np.ndarray:
+    sd0 = np.reshape(np.array(corners[0][0]), (8, 1))
+    sd0 = np.array([(s - IMG_HALF) / IMG_HALF for s in sd0])
+    return sd0
 
-dt = 1/240 # pybullet simulation step
-q0 = 0.5  # starting position (radian)
-qd = 0.5
 
-xd = 0.5
-yd = 0.5
+def collect_metadata(
+    box_id: int, position_list: List[List[float]], orientation_list: List[List[float]]
+):
+    linkState = p.getLinkState(box_id, linkIndex=8, computeLinkVelocity=1)
+    position, quaternion = linkState[0], linkState[1]
+    orientation = np.degrees(p.getEulerFromQuaternion(quaternion))
+    position_list.append(position)
+    orientation_list.append(orientation)
 
-L = 0.5
-Z0 = 0.3
-pos = q0
-maxTime = 10
-logTime = np.arange(0.0, maxTime, dt)
-sz = logTime.size
-logPos = np.zeros(sz)
-logPos[0] = q0
-logVel = np.zeros(sz)
 
-jointIndices = [1,3,5]
-eefLinkIdx = 6
+def plot_metadata(
+    position_list: List[List[float]],
+    orientation_list: List[List[float]],
+    time: np.ndarray,
+    figsize: Tuple = (10, 6),
+):
+    position_list = np.array(position_list)
+    orientation_list = np.array(orientation_list)
+    fig, axs = plt.subplots(nrows=2, figsize=figsize)
+    fig.suptitle('Movement trajectory')
+    axs[0].plot(time, position_list[:,0], label="X")
+    axs[0].plot(time, position_list[:,1], label="Y")
+    axs[0].plot(time, position_list[:,2], label="Z")
+    axs[0].legend()
+    axs[0].set_title("XYZ")
+    axs[0].set_xlabel('time, sec.')
+    axs[0].set_ylabel('position')
 
-#or p.DIRECT for non-graphical version
-physicsClient = p.connect(p.GUI, options="--background_color_red=1 --background_color_blue=1 --background_color_green=1")
-p.resetDebugVisualizerCamera(
-    cameraDistance=0.5,
-    cameraYaw=-90,
-    cameraPitch=-89.999,
-    cameraTargetPosition=[0.5, 0.5, 0.6]
-)
-p.setGravity(0,0,-10)
-boxId = p.loadURDF("./simple.urdf.xml", useFixedBase=True)
+    axs[1].plot(time, orientation_list[:,0], label="Roll")
+    axs[1].plot(time, orientation_list[:,1], label="Pitch")
+    axs[1].plot(time, orientation_list[:,2], label="Yaw")
+    axs[1].set_title("Rotation")
+    axs[1].legend()
+    axs[1].set_xlabel('time, sec.')
+    axs[1].set_ylabel('angle, deg.')
+    plt.show(block=True)
 
-# add aruco cube and aruco texture
-c = p.loadURDF('aruco.urdf', (0.5, 0.5, 0.0), useFixedBase=True)
-x = p.loadTexture('aruco_cube.png')
-p.changeVisualShape(c, -1, textureUniqueId=x)
-
-numJoints = p.getNumJoints(boxId)
-for idx in range(numJoints):
-    print(f"{idx} {p.getJointInfo(boxId, idx)[1]} {p.getJointInfo(boxId, idx)[12]}")
-
-print(p.isNumpyEnabled())
-
-# go to the desired position
-p.setJointMotorControlArray(bodyIndex=boxId, jointIndices=jointIndices, targetPositions=[0.0, 1.5708, 0.0], controlMode=p.POSITION_CONTROL)
-for _ in range(100):
-    p.stepSimulation()
-
-updateCamPos(camera)
-img = camera.get_frame()
-corners, markerIds, rejectedCandidates = detector.detectMarkers(img)
-sd0 = np.reshape(np.array(corners[0][0]),(8,1))
-sd0 = np.array([(s-IMG_HALF)/IMG_HALF for s in sd0])
-sd = np.reshape(np.array(corners[0][0]),(8,1)).astype(int)
-
-# go to the starting position
-p.setJointMotorControlArray(bodyIndex=boxId, jointIndices=jointIndices, targetPositions=[0.1, 1.4708, 0.1], controlMode=p.POSITION_CONTROL)
-for _ in range(100):
-    p.stepSimulation()
-
-idx = 1
-camCount = 0
-w = np.zeros((3,1))
-for t in logTime[1:]:
-    p.stepSimulation()
-
-    camCount += 1
-    if (camCount == 5):
-        camCount = 0
-        updateCamPos(camera)
-        camera.get_frame()
-        img = camera.get_frame()
-        corners, markerIds, rejectedCandidates = detector.detectMarkers(img)
-        s = corners[0][0,0]
-        s0 = np.reshape(np.array(corners[0][0]),(8,1))
-        s0 = np.array([(ss-IMG_HALF)/IMG_HALF for ss in s0])
-        L0 = computeInterMatrix(Z0, s0)
-        L0T = np.linalg.inv(L0.T@L0)@L0.T
-        e = s0 - sd0
-        coef = 1/2
-        w = -coef * L0T @ e
-
-    jStates = p.getJointStates(boxId, jointIndices=jointIndices)
-    jPos = [state[0] for state in jStates]
-    jVel = [state[1] for state in jStates]
-    (linJac,angJac) = p.calculateJacobian(
-        bodyUniqueId = boxId, 
-        linkIndex = 6,
-        localPosition = [0,0,0],
-        objPositions = jPos,
-        objVelocities = [0,0,0],
-        objAccelerations = [0,0,0]
+def init_enviroment(verbose: bool = True) -> int:
+    options = (
+        "--background_color_red=1 --background_color_blue=1 --background_color_green=1"
     )
+    if verbose:
+        options += " --debug"
 
-    J = np.block([
-        [np.array(linJac)[:2,:2], np.zeros((2,1))],
-        [np.array(angJac)[2,:]]
-    ])
-    dq = (np.linalg.inv(J) @ w).flatten()[[1,0,2]]
-    dq[2] = -dq[2]
-    p.setJointMotorControlArray(bodyIndex=boxId, jointIndices=jointIndices, targetVelocities=dq, controlMode=p.VELOCITY_CONTROL)
-    #time.sleep(0.01)
-    
-p.disconnect()
+    p.connect(p.GUI, options=options)
+    p.resetDebugVisualizerCamera(
+        cameraDistance=0.5,
+        cameraYaw=-90,
+        cameraPitch=-89.999,
+        cameraTargetPosition=[0.5, 0.5, 0.6],
+    )
+    p.setGravity(0, 0, -10)
+    box_id = p.loadURDF(SIMULATION_URDF, useFixedBase=True)
+    c = p.loadURDF(ARUCO_URDF, (0.5, 0.5, 0.0), useFixedBase=True)
+    x = p.loadTexture(ARUCO_TEXTURE)
+    p.changeVisualShape(c, -1, textureUniqueId=x)
+    return box_id
+
+
+def start_simulation(verbose: bool = True):
+    box_id = init_enviroment(verbose=verbose)
+    feature_extractor = FeatureExtractor(body_id=box_id)
+    numJoints = p.getNumJoints(box_id)
+    positions: List[List[float]] = []
+    orientations: List[List[float]] = []
+
+    if verbose:
+        for idx in range(numJoints):
+            logging.info(
+                f"{idx} {p.getJointInfo(box_id, idx)[1]} {p.getJointInfo(box_id, idx)[12]}"
+            )
+        (
+            logging.info("Running with numpy backend.")
+            if p.isNumpyEnabled()
+            else logging.warning("Numpy is not not available! Perfomance may degrade.")
+        )
+
+    p.setJointMotorControlArray(
+        bodyIndex=box_id,
+        jointIndices=jointIndices,
+        targetPositions=TARGET_POSITION,
+        controlMode=p.POSITION_CONTROL,
+    )
+    for _ in range(simulation_steps):
+        p.stepSimulation()
+    corners = feature_extractor.get_features()
+    if corners and len(corners) > 0 and len(corners[0]) > 0:
+        s_target = get_feature_vector(corners=corners)
+    else:
+        logging.critical("No desired corners detected")
+
+    # go to the starting position
+    p.setJointMotorControlArray(
+        bodyIndex=box_id,
+        jointIndices=jointIndices,
+        targetPositions=START_POSITION,
+        controlMode=p.POSITION_CONTROL,
+    )
+    for _ in range(simulation_steps):
+        p.stepSimulation()
+    collect_metadata(box_id=box_id, position_list=positions, orientation_list=orientations)
+
+    camCount = 0
+    w = np.zeros((4, 1))
+    for t in logTime[1:]:
+        p.stepSimulation()
+        collect_metadata(
+            box_id=box_id, position_list=positions, orientation_list=orientations
+        )
+        camCount += 1
+        if camCount == 5:
+            camCount = 0
+            corners = feature_extractor.get_features()
+            if corners and len(corners) > 0 and len(corners[0]) > 0:
+                s0 = get_feature_vector(corners=corners)
+                Z0 = feature_extractor.camera.eye_position[2]
+                L0 = computeInteractionMatrix(Z0, s0)
+                L0T = np.linalg.inv(L0.T @ L0) @ L0.T
+                e = s0 - s_target
+                w = -LAMBDA * L0T @ e
+            else:
+                logging.critical(
+                    f"No corners detected on {t}/{len(logTime[1:])} timestamp"
+                )
+
+        jStates = p.getJointStates(box_id, jointIndices=jointIndices)
+        jPos = [state[0] for state in jStates]
+        (linJac, angJac) = p.calculateJacobian(
+            bodyUniqueId=box_id,
+            linkIndex=eefLinkIdx,
+            localPosition=[0, 0, 0],
+            objPositions=jPos,
+            objVelocities=[0, 0, 0, 0],
+            objAccelerations=[0, 0, 0, 0],
+        )
+
+        J = np.block([[np.array(linJac)], [np.array(angJac)[2, :]]])
+        dq = (np.linalg.inv(J) @ w).flatten()[[1, 0, 2, 3]]
+        dq[2] = -dq[2]
+        dq[3] = -dq[3]
+        p.setJointMotorControlArray(
+            bodyIndex=box_id,
+            jointIndices=jointIndices,
+            targetVelocities=dq,
+            controlMode=p.VELOCITY_CONTROL,
+        )
+
+    p.disconnect()
+    plot_metadata(position_list=positions, orientation_list=orientations, time=logTime)
+
+
+def _parse_args():
+    parser = argparse.ArgumentParser()
+    parser.add_argument(
+        "-v",
+        "--verbose",
+        action="store_true",
+        help="Allow printing additional logging.",
+    )
+    args = parser.parse_args()
+    return args
+
+
+def main():
+    logger = logging.getLogger("aruco")
+    logger.setLevel(logging.INFO)
+    args = _parse_args()
+    start_simulation(verbose=args.verbose)
+
+
+if __name__ == "__main__":
+    main()

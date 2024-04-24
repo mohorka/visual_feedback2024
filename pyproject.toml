@@ -1,0 +1,26 @@
+[tool.poetry]
+name = "visual-feedback2024"
+version = "0.1.0"
+description = "Test task for visual feedback course"
+authors = ["Victoria <victoria2000dzuba@gmail.com>"]
+readme = "README.md"
+packages = [{include = "combined"}]
+
+[tool.poetry.dependencies]
+python = "^3.10"
+matplotlib = "3.7.2"
+numpy = "1.25.2"
+opencv-python = "4.8.1.78"
+pybullet = "3.2.6"
+scipy = "1.13.0"
+
+[tool.poetry.group.dev.dependencies]
+isort = "^5.13.2"
+black = "^24.4.0"
+flake8 = "^7.0.0"
+
+[tool.poetry.scripts]
+start_simulation = "combined.run:main"
+[build-system]
+requires = ["poetry-core"]
+build-backend = "poetry.core.masonry.api"
